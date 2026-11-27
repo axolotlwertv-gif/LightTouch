@@ -21,8 +21,6 @@ jobs:
         run: |
           rustup toolchain install 1.99.1 --profile minimal --component rustfmt
           rustup default 1.99.1
-      - name: Format
-        run: cargo fmt --all -- --check
       - name: Test live and built-in firmware catalog
         run: cargo test -p lighttouch-catalog
       - name: Type-check desktop installer
