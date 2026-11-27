@@ -6,7 +6,7 @@ use lighttouch_catalog::Bootrom;
 use lighttouch_catalog::catalog::{Catalog, DeviceGroup, Firmware, RECOMMENDED, Support};
 use lighttouch_model::prepare::{self, IpswCheck, IpswSource, PrepareRequest};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc::{self, Receiver, TryRecvError}, Arc, Mutex};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -39,6 +39,18 @@ pub struct PrepareState {
     pub error: Option<String>,
     /// When the running preparation started (for the elapsed time).
     pub started: Option<Instant>,
+    /// Live IPSW.me product list for newer iPhones and iPads.
+    pub live_devices: Option<Vec<lighttouch_catalog::ipsw_me::Device>>,
+    pub live_devices_loading: bool,
+    pub live_devices_error: Option<String>,
+    live_devices_rx: Option<Receiver<Result<Vec<lighttouch_catalog::ipsw_me::Device>, String>>>,
+    /// Selected live product name and its IPSW history.
+    pub live_device_name: Option<String>,
+    pub live_firmwares: Option<Vec<lighttouch_catalog::ipsw_me::Firmware>>,
+    pub live_firmware_product: Option<String>,
+    pub live_firmwares_loading: bool,
+    pub live_firmwares_error: Option<String>,
+    live_firmwares_rx: Option<Receiver<Result<Vec<lighttouch_catalog::ipsw_me::Firmware>, String>>>,
 }
 
 /// A chosen IPSW being checked on a thread: its hashing progress, then its SHA-1 and verdict.
@@ -56,6 +68,79 @@ pub struct Pending {
 }
 
 impl PrepareState {
+    fn request_live_devices(&mut self) {
+        if self.live_devices.is_some() || self.live_devices_loading {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.live_devices_rx = Some(rx);
+        self.live_devices_loading = true;
+        std::thread::spawn(move || {
+            let _ = tx.send(lighttouch_catalog::ipsw_me::devices());
+        });
+    }
+
+    fn request_live_firmwares(&mut self, product: String) {
+        if self.live_firmware_product.as_deref() == Some(product.as_str())
+            && (self.live_firmwares.is_some() || self.live_firmwares_loading)
+        {
+            return;
+        }
+        self.live_firmware_product = Some(product.clone());
+        self.live_firmwares = None;
+        self.live_firmwares_error = None;
+        self.live_firmwares_loading = true;
+        let (tx, rx) = mpsc::channel();
+        self.live_firmwares_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(lighttouch_catalog::ipsw_me::firmwares(&product));
+        });
+    }
+
+    fn poll_live_requests(&mut self) {
+        let device_result = self.live_devices_rx.as_ref().map(Receiver::try_recv);
+        match device_result {
+            Some(Ok(Ok(devices))) => {
+                self.live_devices = Some(devices);
+                self.live_devices_loading = false;
+                self.live_devices_error = None;
+                self.live_devices_rx = None;
+            }
+            Some(Ok(Err(error))) => {
+                self.live_devices_loading = false;
+                self.live_devices_error = Some(error);
+                self.live_devices_rx = None;
+            }
+            Some(Err(TryRecvError::Disconnected)) => {
+                self.live_devices_loading = false;
+                self.live_devices_error = Some("The IPSW.me request stopped unexpectedly.".into());
+                self.live_devices_rx = None;
+            }
+            Some(Err(TryRecvError::Empty)) | None => {}
+        }
+
+        let firmware_result = self.live_firmwares_rx.as_ref().map(Receiver::try_recv);
+        match firmware_result {
+            Some(Ok(Ok(firmwares))) => {
+                self.live_firmwares = Some(firmwares);
+                self.live_firmwares_loading = false;
+                self.live_firmwares_error = None;
+                self.live_firmwares_rx = None;
+            }
+            Some(Ok(Err(error))) => {
+                self.live_firmwares_loading = false;
+                self.live_firmwares_error = Some(error);
+                self.live_firmwares_rx = None;
+            }
+            Some(Err(TryRecvError::Disconnected)) => {
+                self.live_firmwares_loading = false;
+                self.live_firmwares_error = Some("The IPSW.me request stopped unexpectedly.".into());
+                self.live_firmwares_rx = None;
+            }
+            Some(Err(TryRecvError::Empty)) | None => {}
+        }
+    }
+
     /// Forget a chosen IPSW and anything said about it (another version was chosen).
     pub fn clear_ipsw(&mut self) {
         self.ipsw_file = None;
@@ -131,6 +216,10 @@ pub fn open(app: &mut App) {
 }
 
 pub fn show(app: &mut App, ui: &mut Ui) {
+    app.prepare.poll_live_requests();
+    if app.prepare.step == Step::Device {
+        app.prepare.request_live_devices();
+    }
     // A preparation in progress always shows its progress.
     if matches!(app.model.busy(), Some((lighttouch_model::Activity::Preparing(_), _))) {
         app.prepare.step = Step::Progress;
@@ -171,10 +260,47 @@ fn device_step(app: &mut App, ui: &mut Ui) {
                 let best = group.firmwares.iter().map(|f| f.support()).min().unwrap_or(Support::Untested);
                 if choice_row(ui, &p, icons::PHONE, group.name(), &group.summary(), Some(best)).clicked() {
                     app.prepare.product = Some(group.product_type.clone());
+                    app.prepare.live_device_name = None;
+                    app.prepare.live_firmware_product = None;
+                    app.prepare.live_firmwares = None;
                     app.prepare.step = Step::Version;
                 }
             }
         });
+    }
+
+    widgets::section(ui, &p, "More iPhone and iPad models");
+    ui.label(widgets::muted(&p, "Live device and firmware list from IPSW.me. These newer models are listed for firmware reference; emulation support is not implemented yet.").size(12.5));
+    ui.add_space(4.0);
+    if app.prepare.live_devices_loading {
+        ui.label(widgets::muted(&p, "Loading devices from IPSW.me…").size(12.5));
+    }
+    if let Some(error) = &app.prepare.live_devices_error {
+        ui.label(RichText::new(error).size(12.5).color(theme::warning(&p)));
+    }
+    if let Some(devices) = app.prepare.live_devices.clone() {
+        for (title, iphone) in [("iPhone 8 and newer", true), ("iPad 2 and newer (including mini, Air and Pro)", false)] {
+            let list: Vec<_> = devices.iter().filter(|d| d.identifier.starts_with("iPhone") == iphone).collect();
+            if list.is_empty() {
+                continue;
+            }
+            ui.add_space(6.0);
+            widgets::section(ui, &p, title);
+            widgets::card(ui, &p, |ui| {
+                for device in list {
+                    let subtitle = format!("{} · IPSW.me firmware list · emulation not implemented", device.identifier);
+                    if choice_row(ui, &p, icons::PHONE, &device.name, &subtitle, None).clicked() {
+                        app.prepare.product = Some(device.identifier.clone());
+                        app.prepare.live_device_name = Some(device.name.clone());
+                        app.prepare.firmware = None;
+                        app.prepare.live_firmware_product = None;
+                        app.prepare.live_firmwares = None;
+                        app.prepare.live_firmwares_error = None;
+                        app.prepare.step = Step::Version;
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -185,7 +311,10 @@ fn version_step(app: &mut App, ui: &mut Ui) {
         return;
     };
     let groups = Catalog::get().devices();
-    let Some(group) = groups.iter().find(|g| g.product_type == product) else { return };
+    let Some(group) = groups.iter().find(|g| g.product_type == product) else {
+        live_version_step(app, ui, &product);
+        return;
+    };
     let name = group.name();
     header(
         app,
@@ -237,6 +366,63 @@ fn version_step(app: &mut App, ui: &mut Ui) {
             app.prepare.show_betas = !app.prepare.show_betas;
         }
     }
+}
+
+/// Newer devices are browsable through IPSW.me, but cannot enter the preparation path until
+/// the emulator has a matching machine model and firmware recipe.
+fn live_version_step(app: &mut App, ui: &mut Ui, product: &str) {
+    if app.prepare.live_firmware_product.as_deref() != Some(product) {
+        app.prepare.request_live_firmwares(product.to_owned());
+    }
+    let p = app.palette;
+    let name = app.prepare.live_device_name.clone().unwrap_or_else(|| product.to_owned());
+    header(
+        app,
+        ui,
+        &format!("Firmware for {name}"),
+        "Versions supplied by IPSW.me. This device cannot be prepared or booted yet.",
+        |app| app.prepare.step = Step::Device,
+    );
+
+    if app.prepare.live_firmwares_loading {
+        ui.label(widgets::muted(&p, "Loading iOS versions from IPSW.me…").size(12.5));
+    }
+    if let Some(error) = &app.prepare.live_firmwares_error {
+        ui.label(RichText::new(error).size(12.5).color(theme::warning(&p)));
+    }
+    if let Some(firmwares) = app.prepare.live_firmwares.clone() {
+        if firmwares.is_empty() {
+            ui.label(widgets::muted(&p, "IPSW.me returned no restore firmwares for this product.").size(12.5));
+        } else {
+            ui.label(widgets::muted(&p, format!("{} restore firmware versions found · signed and unsigned", firmwares.len())).size(12.5));
+            ui.add_space(8.0);
+            widgets::card(ui, &p, |ui| {
+                for firmware in &firmwares {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(format!("iOS {}", firmware.version)).strong());
+                            ui.label(widgets::muted(&p, format!("Released {} · build {}", firmware.releasedate, firmware.buildid)).size(12.0));
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let (label, color) = if firmware.signed { ("Signed", p.primary) } else { ("Unsigned", p.on_surface_variant) };
+                            ui.label(RichText::new(label).size(12.0).color(color));
+                            if firmware.filesize > 0 {
+                                ui.label(widgets::muted(&p, format!("{:.1} GB", firmware.filesize as f64 / 1_000_000_000.0)).size(11.5));
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
+                    ui.separator();
+                }
+            });
+        }
+    }
+
+    ui.add_space(12.0);
+    widgets::card(ui, &p, |ui| {
+        ui.label(RichText::new("Emulation not implemented").strong().color(theme::warning(&p)));
+        ui.label(widgets::muted(&p, "The firmware list is informational only. Prepare device stays disabled until the matching Apple hardware, boot chain, peripherals and GPU are implemented and tested in QEMU-iOS.").size(12.5));
+    });
 }
 
 /// What the preparation will use and what it does, laid out like Android's: the IPSW, the boot file, then what
