@@ -69,7 +69,7 @@ pub struct Pending {
 
 impl PrepareState {
     fn request_live_devices(&mut self) {
-        if self.live_devices.is_some() || self.live_devices_loading {
+        if self.live_devices.is_some() || self.live_devices_loading || self.live_devices_error.is_some() {
             return;
         }
         let (tx, rx) = mpsc::channel();
@@ -82,7 +82,7 @@ impl PrepareState {
 
     fn request_live_firmwares(&mut self, product: String) {
         if self.live_firmware_product.as_deref() == Some(product.as_str())
-            && (self.live_firmwares.is_some() || self.live_firmwares_loading)
+            && (self.live_firmwares.is_some() || self.live_firmwares_loading || self.live_firmwares_error.is_some())
         {
             return;
         }
@@ -277,6 +277,10 @@ fn device_step(app: &mut App, ui: &mut Ui) {
     }
     if let Some(error) = &app.prepare.live_devices_error {
         ui.label(RichText::new(error).size(12.5).color(theme::warning(&p)));
+        if widgets::text_button(ui, &p, "Retry IPSW.me").clicked() {
+            app.prepare.live_devices_error = None;
+            app.prepare.request_live_devices();
+        }
     }
     if let Some(devices) = app.prepare.live_devices.clone() {
         for (title, iphone) in [("iPhone 8 and newer", true), ("iPad 2 and newer (including mini, Air and Pro)", false)] {
@@ -389,6 +393,11 @@ fn live_version_step(app: &mut App, ui: &mut Ui, product: &str) {
     }
     if let Some(error) = &app.prepare.live_firmwares_error {
         ui.label(RichText::new(error).size(12.5).color(theme::warning(&p)));
+        if widgets::text_button(ui, &p, "Retry IPSW.me").clicked() {
+            app.prepare.live_firmwares_error = None;
+            app.prepare.live_firmware_product = None;
+            app.prepare.request_live_firmwares(product.to_owned());
+        }
     }
     if let Some(firmwares) = app.prepare.live_firmwares.clone() {
         if firmwares.is_empty() {
