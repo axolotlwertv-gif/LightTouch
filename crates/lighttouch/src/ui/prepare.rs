@@ -7,7 +7,7 @@ use lighttouch_catalog::catalog::{Catalog, DeviceGroup, Firmware, RECOMMENDED, S
 use lighttouch_model::prepare::{self, IpswCheck, IpswSource, PrepareRequest};
 use std::path::PathBuf;
 use std::sync::{mpsc::{self, Receiver, TryRecvError}, Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Step {
@@ -219,6 +219,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     app.prepare.poll_live_requests();
     if app.prepare.step == Step::Device {
         app.prepare.request_live_devices();
+    }
+    if app.prepare.live_devices_loading || app.prepare.live_firmwares_loading {
+        ui.ctx().request_repaint_after(Duration::from_millis(100));
     }
     // A preparation in progress always shows its progress.
     if matches!(app.model.busy(), Some((lighttouch_model::Activity::Preparing(_), _))) {
