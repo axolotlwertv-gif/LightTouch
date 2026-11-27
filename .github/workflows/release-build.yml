@@ -80,7 +80,13 @@ jobs:
           [ -n "$guest" ] || { echo '::error::no successful Guest packages run'; exit 1; }
           version="$IN_VERSION"
           [ -n "$version" ] || version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)-ci.$GITHUB_RUN_NUMBER"
-          platforms="${IN_PLATFORMS:-android,desktop,macos}"
+          if [ -n "$IN_PLATFORMS" ]; then
+            platforms="$IN_PLATFORMS"
+          elif [ "$GITHUB_REF_NAME" = "ci/extended-ios-device-catalog" ]; then
+            platforms=desktop
+          else
+            platforms=android,desktop,macos
+          fi
           { echo "version=$version"; echo "engine=$engine"; echo "guest_run=$guest"; echo "platforms=$platforms"; } >> "$GITHUB_OUTPUT"
           echo "### LightTouch $version" >> "$GITHUB_STEP_SUMMARY"
           echo "app \`$GITHUB_SHA\`, engine \`$engine\` ($ref), guest tools from run $guest, platforms $platforms" >> "$GITHUB_STEP_SUMMARY"
