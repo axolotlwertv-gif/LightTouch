@@ -4,6 +4,7 @@ pub mod catalog;
 pub mod download;
 pub mod guest_tools;
 pub mod ipa;
+pub mod ipsw_me;
 pub mod store;
 pub mod target;
 
